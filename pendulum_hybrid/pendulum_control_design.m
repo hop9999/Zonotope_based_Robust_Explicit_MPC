@@ -3,11 +3,12 @@ clc;
 close all;
 cvx_clear;
 
-n = 2; m = 1;
-z = 12;
+n = 2;  %dof state
+m = 1;  %dof action
+z = 12; %dof zonotope
 
 dt = 4e-3;
-%number of iteration
+%number of iterations
 Count = 90;
 
 %%%%%%%%%%%%%%%%%%%
@@ -27,8 +28,10 @@ I4 = 0.0045 + 0.46*l_ad2^2 + 1.3*I_ad;
 k_qf = 0.00109;
 k_qc = 0.46;
 K = 129;
-q_c = 3.254-pi;
 q_lin = pi;
+
+%hybrid params
+hybrid_switch_angle = 3.254-pi;
 
 %A nominal
 Af1 = [0                1
@@ -69,109 +72,120 @@ Cf2 = [0
        -0.0*I/I]*dt;
   
 Cc1 = [0
-      0.9*K*q_c/I]*dt;
+      0.9*K*hybrid_switch_angle/I]*dt;
   
 Cc2 = [0
-      1.1*K*q_c/I]*dt;
+      1.1*K*hybrid_switch_angle/I]*dt;
+
 %%%%%%%%%%%%%%%%%%%
+% containment
+%H_start = <x_start, G_start>
+%H_goal  = <x_goal,  G_goal>
 
-
-x_0 = [0.0;0.0];
-x_g = [0.0;0.0];
-
+x_start = [0.0; 0.0];
+x_goal = [0.0; 0.0];
 G_start = [diag([0.02 0.4]) zeros(n,z)];
+G_goal = [diag([0.02 0.4]) zeros(n,z)];
 
-G_end = [diag([0.02 0.4]) zeros(n,z)];
 
-u_lim = 20;
-T_max = [u_lim];
+%%%%%%%%%%%%%%%%%%%
+%torque limits
+H_u = [20];
 
-%limits
-x_c = [q_c+0.2;0];
-G_c = diag([0.21 10]);
+%%%%%%%%%%%%%%%%%%%
+%space partition containment
+x_contact = [hybrid_switch_angle+0.2;0];
+G_contact = diag([0.21 10]);
 
-x_f = [q_c-0.3;0];
-G_f = diag([0.31 10]);
+x_free = [hybrid_switch_angle-0.3;0];
+G_free = diag([0.31 10]);
 
 %%%%%%%%%%%%%%%%%%%
 %disturbance
 %dist zonotop size
-w = 2;
-W = 12*diag([0.0001,0.001]);
+disturbance_dof = 2;
+W = 12*diag([0.0001, 0.001]);
 %%%%%%%%%%%%%%%%%%%
 
 cvx_solver Gurobi_2
 cvx_begin
     cvx_precision best
-    variable G(n, z+n, (Count+1))
-    variable T(m, z+n, Count)
+    variable G(n, z+n, (Count+1)) %state  zonotope generator
+    variable T(m, z+n, Count)     %action zonotope generator
     
-    variable x(n, (Count+1))
-    variable u(m, (Count+1))
+    variable x(n, (Count+1)) %state  zonotope center
+    variable u(m, (Count+1)) %action zonotope center
     
-    variable Gamma_end(z+n, z+w)
-    variable betta_end(z+n, 1)
+    variable Gamma_end(z+n, z+disturbance_dof) %state  zonotope containment auxillary var
+    variable betta_end(z+n, 1)                 %state  zonotope containment auxillary var
     
-    variable Gamma_f(n, z+w, Count)
-    variable betta_f(n, 1, Count)
+    variable Gamma_u(m, z+n, Count)  %action  zonotope containment auxillary var
+    variable betta_u(m, 1, Count)    %action  zonotope containment auxillary var
     
-    variable Gamma_c(n, z+w, Count)
-    variable betta_c(n, 1, Count)
+    variable Gamma_free(n, z+disturbance_dof, Count)      %hybrid state  zonotope containment auxillary var
+    variable betta_free(n, 1, Count)                      %hybrid state  zonotope containment auxillary var
+    variable Gamma_contact(n, z+disturbance_dof, Count)   %hybrid state  zonotope containment auxillary var 
+    variable betta_contact(n, 1, Count)                   %hybrid state  zonotope containment auxillary var
     
-    variable Gamma_u(m, z+n, Count)
-    variable betta_u(m, 1, Count)
-    
-    variable af(n,Count) nonnegative
-    variable ac(n,Count) nonnegative
+    variable a_free(n,Count) nonnegative %order reduction  var
+    variable a_contact(n,Count) nonnegative
 
-    variable z1(Count) binary
+    variable bigM_binary(Count) binary
 
-    M = 100;
+    bigM = 100;
 
-    Tvectorized = reshape(T(:, :, :), m*(z+n )*Count, []);
+    %to find norms of the generators and other matrix-shapes variables we
+    %vectorize them
+    Tvectorized = reshape(T(:, :, :), m*(z+n)*Count, []);
     Gvectorized_x = reshape(G(1, :, 2:end),  (z+n)*Count, []);
     Gvectorized_dx = reshape(G(2, :, 2:end), (z+n)*Count, []);
 
-    af_vect = reshape(af,n*Count,[]);
-    ac_vect = reshape(ac,n*Count,[]);
+    a_free_vect = reshape(a_free,n*Count,[]);
+    a_contact_vect = reshape(a_contact,n*Count,[]);
     
     cost_norm = 1;
     n_mid = floor(Count/2);
 
-    minimize(1*norm(af_vect,1) + 1*norm(ac_vect,1) + 10*norm(u,cost_norm) + 1*norm(Tvectorized,cost_norm) + 1*norm(Gvectorized_x,cost_norm) + 1*norm(Gvectorized_dx,cost_norm))
-%наложить доп конмстреинт на зонотопы
+    minimize(1*norm(a_free_vect,cost_norm) + 1*norm(a_contact_vect,cost_norm) + 10*norm(u,cost_norm) + ...
+        1*norm(Tvectorized,cost_norm) + 1*norm(Gvectorized_x,cost_norm) + 1*norm(Gvectorized_dx,cost_norm))
+
     subject to
 
-        %init
-        x_0 == x(:,1)
-        G(:, :, 1) == G(:, :, Count+1)
-        x(:,Count+1) == x(:,1)
-         %goal
-        G(:, :, Count+1) == G_end*Gamma_end
-        x_g - x(:,Count+1) == G_end*betta_end
-        norm([Gamma_end,betta_end],inf) <= 1
+        %init, goal
+        x(:,1) == x_start;
+        x(:,1) == x(:,Count+1);
+        G(:, :, Count+1) == G(:, :, 1);
+        
+        %containment in <x_goal, G_goal>
+        G(:, :, Count+1) == G_goal*Gamma_end;
+        x_goal - x(:,Count+1) == G_goal*betta_end;
+        norm([Gamma_end,betta_end],inf) <= 1;
         
         for i = 1:Count
-            du(:,i) == u(:,i+1) - u(:,i);
-            abs(du(:,i)) <= 0.1
-              (x(1,i) - q_c) <= M*z1(i)
-              (x(1,i) - q_c) >= -M*(1-z1(i))
-            x(1,n_mid) >= q_c + 0.005
-            %control limit
-            T(:, :, i) == T_max*Gamma_u(:,:,i)
-            0 - u(:,i) == T_max*betta_u(:,:,i)
-            norm([Gamma_u(:,:,i),betta_u(:,:,i)],1) <= 1
+            (x(1,i) - hybrid_switch_angle) <= bigM  * bigM_binary(i);
+            (x(1,i) - hybrid_switch_angle) >= -bigM * (1-bigM_binary(i));
+            x(1,n_mid) >= hybrid_switch_angle + 0.005;
             
+            %torque limits as containment
+            T(:, :, i) == H_u*Gamma_u(:,:,i);
+            0 - u(:,i) == H_u*betta_u(:,:,i);
+            norm([Gamma_u(:,:,i),betta_u(:,:,i)],1) <= 1;
+            
+            %zonotope propagation - centers - for each vertice in the
+            %affine model set
             xf1 = Af1*x(:,i) + B*u(:,i) + Cf1;
             xf2 = Af2*x(:,i) + B*u(:,i) + Cf1;
             xf3 = Af3*x(:,i) + B*u(:,i) + Cf2;
             xf4 = Af4*x(:,i) + B*u(:,i) + Cf2;
             
+            %zonotope propagation - generators - for each vertice in the
+            %affine model set
             Gf1 = Af1*G(:, :, i) + B*T(:,:,i);
             Gf2 = Af2*G(:, :, i) + B*T(:,:,i);
             Gf3 = Af3*G(:, :, i) + B*T(:,:,i);
             Gf4 = Af4*G(:, :, i) + B*T(:,:,i);
             
+            %convex hull approximation - begin
             Ff1 = [Gf1 + Gf2 (xf1 - xf2) Gf1 - Gf2]/2;
             Ff2 = [Gf3 + Gf4 (xf3 - xf4) Gf3 - Gf4]/2;
             cf1 = (xf1 + xf2)/2;
@@ -179,14 +193,21 @@ cvx_begin
             
             Ff = [Ff1 + Ff2 (cf1 - cf2) Ff1 - Ff2]/2;
             cf = (cf1 + cf2)/2;
+            %convex hull approximation - end
             
+            
+            %Order reduction - ReaZOR - begin
             Ff = [Ff(:,1:2) Ff(:,4:end) Ff(:,3)];
             Ff_1 = Ff(:,1:z-n);
             Ff_2 = Ff(:,z-n+1:end);
             for j = 1:n
-                norm(Ff_2(j,:),1) <= af(j,i)
+                norm(Ff_2(j,:),1) <= a_free(j,i)
             end
+            %Order reduction - ReaZOR - end
             
+            %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+            %%% exactly the same - but for the second hybrid dynamics -
+            %%% begin
             xc1 = Ac1*x(:,i) + B*u(:,i) + Cc1;
             xc2 = Ac2*x(:,i) + B*u(:,i) + Cc1;
             xc3 = Ac3*x(:,i) + B*u(:,i) + Cc2;
@@ -209,27 +230,44 @@ cvx_begin
             Fc_1 = Fc(:,1:z-n);
             Fc_2 = Fc(:,z-n+1:end);
             for j = 1:n
-                norm(Fc_2(j,:),1) <= ac(j,i)
+                norm(Fc_2(j,:),1) <= a_contact(j,i)
             end
+            %%% exactly the same - but for the second hybrid dynamics -
+            %%% end
             
-            %hydrid_constr
-            G(:, :, i) == G_f*Gamma_f(:, :, i)
-            x_f - x(:,i) == G_f*betta_f(:, :, i)
-            norm([Gamma_f(:, :, i),betta_f(:, :, i)],inf) <= 1 + 100*z1(i)*M
             
-            G(:, :, i) == G_c*Gamma_c(:, :, i)
-            x_c - x(:,i) == G_c*betta_c(:, :, i)
-            norm([Gamma_c(:, :, i),betta_c(:, :, i)],inf) <= 1 + 100*(1 - z1(i))*M
+            %hydrid_constr - begin
+            G(:, :, i) == G_free*Gamma_free(:, :, i)
+            x_free - x(:,i) == G_free*betta_free(:, :, i)
+            norm([Gamma_free(:, :, i),betta_free(:, :, i)],inf) <= 1 + 100*bigM_binary(i)*bigM
             
-            norm(reshape(G(:, :, i+1) - [Ff_1 diag(af(:,i)),y*W],n*(z+n),[]),1) <= z1(i)*M
-            norm(x(:,i+1) - cf,1) <= z1(i)*M
+            G(:, :, i) == G_contact*Gamma_contact(:, :, i)
+            x_contact - x(:,i) == G_contact*betta_contact(:, :, i)
+            norm([Gamma_contact(:, :, i),betta_contact(:, :, i)],inf) <= 1 + 100*(1 - bigM_binary(i))*bigM
+            %hydrid_constr - end
             
-            norm(reshape(G(:, :, i+1) - [Fc_1 diag(ac(:,i)),y*W],n*(z+n),[]),1) <= (1 - z1(i))*M
-            norm(x(:,i+1) - cc,1) <= (1 - z1(i))*M
+            %finally we choose the next G, based on big-M - begin
+            norm(reshape(G(:, :, i+1) - [Ff_1 diag(a_free(:,i)),W],n*(z+n),[]),1) <= bigM_binary(i)*bigM
+            norm(x(:,i+1) - cf,1) <= bigM_binary(i)*bigM
+            
+            norm(reshape(G(:, :, i+1) - [Fc_1 diag(a_contact(:,i)),W],n*(z+n),[]),1) <= (1 - bigM_binary(i))*bigM
+            norm(x(:,i+1) - cc,1) <= (1 - bigM_binary(i))*bigM
+            %finally we choose the next G, based on big-M - end
 
         end
 cvx_end
  
+%%% ============= END ====================
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% below are print out and other supplimentary code
+
+
+
 if strcmp(cvx_status, 'Inaccurate/Solved') || strcmp(cvx_status, 'Solved') || strcmp(cvx_status, 'Suboptimal')
     T;
     
@@ -244,17 +282,18 @@ if strcmp(cvx_status, 'Inaccurate/Solved') || strcmp(cvx_status, 'Solved') || st
     Policy = zeros(Count,5);
     Policy_tikh = zeros(Count,5);
     
-    Xset(:, :, 1) = x_0 + G(:, :, 1)*Points_gen;
+    Xset(:, :, 1) = x_start + G(:, :, 1)*Points_gen;
     for i = 1:Count
         Policy(i,:) = [x(:,i)',u(i), T(:, :, i) * pinv(G(:, :, i))];
         lambda = 0.00003;
+        %Tikhonov regularization
         G_inv = pinv(G(:, :, i)'*G(:, :, i) + lambda*eye(z+n))*G(:, :, i)';
         Policy_tikh(i,:) = [x(:,i)',u(i), T(:, :, i) * G_inv];
         Uset(:, :, i) = u(i) + T(:, :, i) * G_inv * (Xset(:, :, i) - x(:,i));
         Dist_gen = 2*rand(2, Point_Count) - ones(2, Point_Count); %for {-1, 1} convention
-        Wset = y*W*Dist_gen;
+        Wset = W*Dist_gen;
 
-        if z1(i) == 0
+        if bigM_binary(i) == 0
             A1 = Af1;
             A2 = Af2;
             A3 = Af3;
@@ -302,7 +341,7 @@ if strcmp(cvx_status, 'Inaccurate/Solved') || strcmp(cvx_status, 'Solved') || st
     
     Policy(:,1) = Policy(:,1) + q_lin;
     Policy_tikh(:,1) = Policy_tikh(:,1) + q_lin;
-    plot([q_c q_c],[-2.5 2.5],'b','LineWidth',2)
+    plot([hybrid_switch_angle hybrid_switch_angle],[-2.5 2.5],'b','LineWidth',2)
     xlabel('x')
     ylabel('dx')
     grid on
